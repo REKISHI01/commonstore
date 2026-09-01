@@ -28,8 +28,11 @@ export async function cloudAction(action:string,payload:any={}) { return api('/a
 export async function markNotificationsRead(ids?:string[]) { return cloudAction('markNotificationsRead',{ids:ids&&ids.length?ids:undefined}) }
 export async function getRealtimeToken(){ return api('/realtime-token') as Promise<{url:string;anonKey:string;accessToken:string}> }
 
-export async function subscribeCloud(onChange:()=>void, onStatus?:(status:string)=>void) {
-  let closed=false, ws:WebSocket|null=null, heartbeat:any=null, reconnect:any=null
+export async function subscribeCloud(onChange:()=>void, onStatus?:(status:string)=>void, debounceMs=0) {
+  let closed=false, ws:WebSocket|null=null, heartbeat:any=null, reconnect:any=null, fireTimer:any=null
+  // debounceMs menggabungkan ledakan event realtime menjadi satu refresh —
+  // mencegah re-pull penuh mengganggu worker di tengah proses.
+  const fire=()=>{ if(debounceMs>0){ if(fireTimer)clearTimeout(fireTimer); fireTimer=setTimeout(onChange,debounceMs) } else onChange() }
   const connect=async()=>{
     try{
       const cfg=await getRealtimeToken()
@@ -44,11 +47,11 @@ export async function subscribeCloud(onChange:()=>void, onStatus?:(status:string
         ws?.send(JSON.stringify(join))
         heartbeat=setInterval(()=>{ if(ws?.readyState===WebSocket.OPEN) ws.send(JSON.stringify({topic:'phoenix',event:'heartbeat',payload:{},ref:String(Date.now())})) },25000)
       }
-      ws.onmessage=(ev)=>{ try{const m=JSON.parse(ev.data); if(m.event==='postgres_changes'||m.event==='broadcast') onChange()}catch{} }
+      ws.onmessage=(ev)=>{ try{const m=JSON.parse(ev.data); if(m.event==='postgres_changes'||m.event==='broadcast') fire()}catch{} }
       ws.onerror=()=>onStatus?.('Realtime terganggu')
       ws.onclose=()=>{ if(heartbeat)clearInterval(heartbeat); onStatus?.('Realtime terputus'); if(!closed)reconnect=setTimeout(connect,2500) }
     }catch{ onStatus?.('Realtime belum aktif'); if(!closed)reconnect=setTimeout(connect,5000) }
   }
   await connect()
-  return ()=>{closed=true;if(heartbeat)clearInterval(heartbeat);if(reconnect)clearTimeout(reconnect);try{ws?.close()}catch{}}
+  return ()=>{closed=true;if(heartbeat)clearInterval(heartbeat);if(reconnect)clearTimeout(reconnect);if(fireTimer)clearTimeout(fireTimer);try{ws?.close()}catch{}}
 }
