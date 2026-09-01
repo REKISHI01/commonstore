@@ -22,6 +22,7 @@ import { AutomationForecastView, ChannelsFeesView, CrmV2View, DashboardCustomize
 import { CommandPalette } from '../features/v4/command-palette'
 import { BulkEditProductsView, OrderKanbanView, ProductScoreView, ProfitSimulatorView, ReportGeneratorView, SmartRestockV41View, WorkerQueueView } from '../features/v4/owner-v41'
 import { priceSafety } from '../lib/v41'
+import { actionCenter } from '../lib/v44'
 import { BusinessCalendarView, CustomerIntelligenceView, DailyOperationsView, DataQualityView, PriceAdvisorView, ProductTemplateView, QuickOrderView, SalesTrendRadarView } from '../features/v4/owner-v42'
 import { AnomalyMonitorView, DeadStockRecoveryView, ExecutiveBriefView, FeeStressView, InventoryAgingView, OpportunityMatrixView, ProfitLeakView, SupplierScorecardView } from '../features/v4/owner-v43'
 import { ActionCenterView, ProfitProtectionView, ReorderPlannerView, ScenarioLabView, ShiftHandoverView, WorkingCapitalView } from '../features/v4/owner-v44'
@@ -50,7 +51,8 @@ const monthKey=(d=new Date())=>`${d.getFullYear()}-${String(d.getMonth()+1).padS
 
 export default function Page(){
   const [mounted,setMounted]=useState(false)
-  const [active,setActive]=useState('Ringkasan')
+  // Nav terakhir disimpan: owner kembali ke halaman yang sama setelah reload.
+  const [active,setActive]=useState(()=>{try{const s=localStorage.getItem('itemkuOwnerNav');if(s&&NAV.some(g=>g.items.includes(s)))return s}catch{}return 'Ringkasan'})
   const [notice,setNotice]=useState('')
   const [products,setProductsState]=useState<Product[]>([])
   const [orders,setOrdersState]=useState<Order[]>([])
@@ -98,11 +100,13 @@ export default function Page(){
   useEffect(()=>{
     if(!cloudUser){setRealtimeStatus('Offline');return}
     let stop:(()=>void)|undefined;let cancelled=false
-    ;(async()=>{try{const fn=await subscribeCloud(()=>void hydrateCloud(),setRealtimeStatus);if(cancelled)fn();else stop=fn}catch{setRealtimeStatus('Realtime belum aktif')}})()
+    ;(async()=>{try{const fn=await subscribeCloud(()=>void hydrateCloud(),setRealtimeStatus,1200);if(cancelled)fn();else stop=fn}catch{setRealtimeStatus('Realtime belum aktif')}})()
     return()=>{cancelled=true;stop?.()}
   },[cloudUser?.id])
 
   useEffect(()=>{if(!mounted)return;const root=document.documentElement;root.classList.remove('dark','light');if(settings.theme!=='system')root.classList.add(settings.theme);saveSettings(settings)},[settings,mounted])
+
+  useEffect(()=>{try{localStorage.setItem('itemkuOwnerNav',active)}catch{}},[active])
 
   const ownerCloud=cloudUser?.role==='owner'
   const saveProductsV=(next:Product[])=>{const prev=products;setProductsState(next);saveProducts(next);if(ownerCloud)void queueDelta('products',prev,next,setSyncState).catch(()=>flash('Tersimpan lokal, sync produk tertunda'))}
@@ -138,7 +142,7 @@ export default function Page(){
       <div className="border-b bg-card px-4 py-2 lg:hidden"><Navigation active={active} setActive={setActive} mobile/></div>
       <div className="mx-auto max-w-[1440px] space-y-5 p-4 md:p-6">
         {notice&&<div className="sticky top-20 z-20 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-800 shadow-sm dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200">{notice}</div>}
-        {active==='Ringkasan'&&<><V4QuickDashboard {...common}/><Dashboard {...common}/></>} {active==='Analytics'&&<AnalyticsView {...common}/>} {active==='Target Bisnis'&&<TargetView {...common}/>} {active==='Notifikasi'&&<AlertsView {...common}/>} 
+        {active==='Ringkasan'&&<><QuickActions setActive={setActive}/><V4QuickDashboard {...common}/><ActionNeededPanel {...common}/><Dashboard {...common}/></>} {active==='Analytics'&&<AnalyticsView {...common}/>} {active==='Target Bisnis'&&<TargetView {...common}/>} {active==='Notifikasi'&&<AlertsView {...common}/>} 
         {active==='Daftar Produk'&&<ProductList {...common}/>} {active==='Tambah Produk'&&<ProductForm {...common}/>} {active==='Restock'&&<RestockView {...common}/>} {active==='Stok Menumpuk'&&<AgingView {...common}/>} {active==='Riwayat Harga'&&<PriceHistoryView {...common}/>} 
         {active==='Order Center'&&<OrderCenter {...common}/>} {active==='Pelanggan'&&<CustomerView {...common}/>} 
         {active==='Cash Flow'&&<CashFlowView {...common}/>} {active==='Payroll'&&<PayrollPanel role="owner"/>} {active==='Profit per Game'&&<ProfitByGame {...common}/>} {active==='Profit Supplier'&&<ProfitSupplier {...common}/>} 
@@ -160,9 +164,20 @@ export default function Page(){
 
 type Ctx=any
 
+function QuickActions({setActive}:Ctx){return <div className="flex flex-wrap gap-2"><button onClick={()=>setActive('Quick Order')} className="btn-primary">+ Buat Order</button><button onClick={()=>setActive('Restock')} className="btn-secondary">+ Restock</button><button onClick={()=>setActive('Action Center')} className="btn-secondary">Pusat Aksi</button></div>}
+
+function ActionNeededPanel({products,orders,settlements,disputes,targets,setActive}:Ctx){
+  const items=useMemo(()=>actionCenter(products,orders,settlements,disputes,targets).slice(0,8),[products,orders,settlements,disputes,targets])
+  return <Card title="Perlu Tindakan" subtitle="Prioritas otomatis lintas modul: stok kritis, margin bocor, settlement, dispute, order terlambat, dan target berisiko." action={<button onClick={()=>setActive('Action Center')} className="text-xs font-bold text-primary">Buka Action Center →</button>}>
+    <div className="grid gap-2 lg:grid-cols-2">{items.map((x:any)=><button key={x.id} onClick={()=>setActive(x.target)} className="rounded-xl border p-3 text-left transition hover:bg-muted/40"><div className="flex items-center justify-between gap-2"><strong className="text-sm">{x.title}</strong><div className="flex gap-1"><Badge tone={x.priority==='P1'?'red':x.priority==='P2'?'amber':'blue'}>{x.priority}</Badge><Badge>{x.category}</Badge></div></div><p className="mt-1.5 text-xs text-muted-foreground">{x.detail}</p>{x.impact>0&&<p className="mt-1.5 text-xs font-bold">Impact: {money(x.impact)}</p>}</button>)}</div>
+    {!items.length&&<Empty text="Semua aman — tidak ada tindakan prioritas saat ini."/>}
+  </Card>
+}
+
 function Dashboard({products,orders,expenses,targets,setActive}:Ctx){
-  const today=new Date();today.setHours(0,0,0,0);const month=new Date();month.setDate(1);month.setHours(0,0,0,0)
-  const now=new Date();const t=businessTotals(orders,expenses,today,now);const m=businessTotals(orders,expenses,month,now);const alerts=deriveAlerts(products,orders);const target=targets.find((x:BusinessTarget)=>x.month===monthKey())
+  const totals=useMemo(()=>{const today=new Date();today.setHours(0,0,0,0);const month=new Date();month.setDate(1);month.setHours(0,0,0,0);const now=new Date();return {t:businessTotals(orders,expenses,today,now),m:businessTotals(orders,expenses,month,now)}},[orders,expenses])
+  const alerts=useMemo(()=>deriveAlerts(products,orders),[products,orders])
+  const t=totals.t,m=totals.m;const month=new Date();month.setDate(1);month.setHours(0,0,0,0);const target=targets.find((x:BusinessTarget)=>x.month===monthKey())
   const progress=target?.targetProfit?Math.min(100,m.netProfit/target.targetProfit*100):0
   return <div className="space-y-5">
     <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5"><Metric label="Omzet hari ini" value={money(t.revenue)}/><Metric label="Profit bersih hari ini" value={money(t.netProfit)} tone={t.netProfit>=0?'good':'bad'}/><Metric label="Order selesai" value={String(t.orderCount)}/><Metric label="Rata-rata profit" value={money(t.avgProfit)}/><Metric label="Peringatan" value={String(alerts.length)} tone={alerts.length?'warn':'good'}/></section>
