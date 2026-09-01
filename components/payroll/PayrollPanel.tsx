@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useState } from 'react'
 import { rupiah } from '@/lib/payroll'
+import { printPayrollSlip } from '@/components/worker/slip-print'
 
 type AnyData = any
 const field='h-10 rounded-lg border bg-background px-3 text-sm'
@@ -48,7 +49,7 @@ export default function PayrollPanel({role}:{role:'owner'|'worker'}){
         </div>
       </div>
       {slips.map((x:any)=><div className={card} key={x.item.id}>
-        <div className="flex flex-wrap justify-between gap-3"><div><b className="text-lg">Slip {x.item.monthKey}</b><div className="mt-1"><StatusBadge text={x.run?.status==='paid'?'PAID':'FINALIZED'}/></div></div><b className="text-xl">{rupiah(x.item.totalPay)}</b></div>
+        <div className="flex flex-wrap justify-between gap-3"><div><b className="text-lg">Slip {x.item.monthKey}</b><div className="mt-1"><StatusBadge text={x.run?.status==='paid'?'PAID':'FINALIZED'}/></div></div><div className="text-right"><b className="text-xl">{rupiah(x.item.totalPay)}</b><div className="mt-2"><button onClick={()=>printPayrollSlip(x.item,x.run)} className="rounded-lg border px-3 py-1.5 text-[11px] font-bold">🖨 Cetak / PDF</button></div></div></div>
         <div className="mt-4 grid gap-x-5 md:grid-cols-2 text-sm">
           <Row k="Gaji tetap" v={rupiah(x.item.baseSalary)}/><Row k={`Share ${x.item.sharePercent}%`} v={rupiah(x.item.shareAmount)}/>
           <Row k="Profit bersih bisnis" v={rupiah(Number(x.item.businessSnapshot?.netProfit)||0)}/><Row k="Profit distributable" v={rupiah(Number(x.item.businessSnapshot?.distributableProfit)||0)}/>

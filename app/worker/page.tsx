@@ -11,6 +11,7 @@ import {
 } from '../../lib/cloud'
 import PayrollPanel from '../../components/payroll/PayrollPanel'
 import { ConfirmDialog, RefundDialog, Modal } from '../../components/worker/Dialogs'
+import { enqueueAction, flushWorkerQueue, isNetworkError, loadQueue } from '../../lib/worker-offline'
 
 type ActiveWorker = {
   id: string
@@ -53,6 +54,8 @@ export default function WorkerPage(){
   const [screen,setScreen]=useState<'orders'|'kinerja'|'payroll'>(()=>loadUi<'orders'|'kinerja'|'payroll'>('screen','orders'))
   const [pending,setPending]=useState<{order:Order;mode:'selesai'|'refund'}|null>(null)
   const [paidTotal,setPaidTotal]=useState<number|null>(null)
+  const [queueLen,setQueueLen]=useState(0)
+  const [info,setInfo]=useState('')
 
   const hydrateLocal=()=>{const ps=loadProducts();setProductsState(ps);setOrdersState(loadOrders(ps));setWorkers(loadWorkers())}
   const hydrateCloud=async()=>{const d=await pullCloud();setProductsState(d.products);setOrdersState(d.orders);setNotifs(d.v4?.notifications||[]);saveProducts(d.products);saveOrders(d.orders)}
@@ -105,7 +108,7 @@ export default function WorkerPage(){
     }catch(err:any){setError(err.message||'Login gagal')}finally{setBusy(false)}
   }
 
-  const logout=async()=>{if(active?.cloud)await cloudSignOut().catch(()=>null);if(active&&!active.cloud)appendAudit('Worker logout',active.name,active.name);setActive(null);setNotifs([]);setStatus(configured?'Cloud siap':'Mode lokal')}
+  const logout=async()=>{if(active?.cloud)await cloudSignOut().catch(()=>null);if(active&&!active.cloud)appendAudit('Worker logout',active.name,active.name);setActive(null);setNotifs([]);setInfo('');setStatus(configured?'Cloud siap':'Mode lokal')}
 
   const allowed=(game:string)=>!active?.permissions.allowedGames.length||active.permissions.allowedGames.includes(game)
   const visibleProducts=useMemo(()=>products.filter(p=>allowed(p.game)),[products,active])
@@ -130,20 +133,52 @@ export default function WorkerPage(){
     catch(err:any){setError(err.message||'Gagal menandai dibaca')}
   }
 
+  const applyLocalTransition=(order:Order,next:OrderStatus,reason:string,restore:boolean)=>{
+    if(!active)return
+    if(['Baru','Diproses','Menunggu'].includes(order.status)&&order.assignedWorker&&order.assignedWorker!==active.name&&active.role!=='owner')throw new Error(`Order sedang dikerjakan ${order.assignedWorker}`)
+    let ps=products
+    if(restore&&!order.stockRestored&&order.productId)ps=products.map(p=>p.id===order.productId?{...p,stock:p.stock+order.qty}:p)
+    const now=new Date().toISOString();const updated:Order={...order,status:next,assignedWorker:order.assignedWorker||active.name,assignedWorkerId:order.assignedWorkerId||active.id,processingAt:(next==='Diproses'||next==='Selesai')?(order.processingAt||now):order.processingAt,completedAt:['Selesai','Refund','Cancel'].includes(next)?now:order.completedAt,refundReason:reason||order.refundReason,stockRestored:Boolean(order.stockRestored||restore)}
+    const os=orders.map(o=>o.id===order.id?updated:o);setProductsState(ps);saveProducts(ps);setOrdersState(os);saveOrders(os);appendAudit(`Worker: ${next}`,`${order.invoiceNo} · ${order.productName}`,active.name)
+  }
+
   const doTransition=async(order:Order,next:OrderStatus,reason='',restore=false)=>{
     if(!active)return
-    setBusy(true);setError('')
+    setBusy(true);setError('');setInfo('')
     try{
-      if(active.cloud){await cloudAction('transitionOrder',{orderId:order.id,status:next,refundReason:reason,restoreStock:restore});await hydrateCloud()}
-      else{
-        if(['Baru','Diproses','Menunggu'].includes(order.status)&&order.assignedWorker&&order.assignedWorker!==active.name&&active.role!=='owner')throw new Error(`Order sedang dikerjakan ${order.assignedWorker}`)
-        let ps=products
-        if(restore&&!order.stockRestored&&order.productId)ps=products.map(p=>p.id===order.productId?{...p,stock:p.stock+order.qty}:p)
-        const now=new Date().toISOString();const updated:Order={...order,status:next,assignedWorker:order.assignedWorker||active.name,assignedWorkerId:order.assignedWorkerId||active.id,processingAt:(next==='Diproses'||next==='Selesai')?(order.processingAt||now):order.processingAt,completedAt:['Selesai','Refund','Cancel'].includes(next)?now:order.completedAt,refundReason:reason||order.refundReason,stockRestored:Boolean(order.stockRestored||restore)}
-        const os=orders.map(o=>o.id===order.id?updated:o);setProductsState(ps);saveProducts(ps);setOrdersState(os);saveOrders(os);appendAudit(`Worker: ${next}`,`${order.invoiceNo} · ${order.productName}`,active.name)
+      if(active.cloud){
+        try{await cloudAction('transitionOrder',{orderId:order.id,status:next,refundReason:reason,restoreStock:restore});await hydrateCloud()}
+        catch(err:any){
+          if(!isNetworkError(err))throw err
+          // Offline: tampilkan niat di layar + masuk antrean; terkirim otomatis saat online.
+          applyLocalTransition(order,next,reason,restore)
+          setQueueLen(enqueueAction('transitionOrder',{orderId:order.id,status:next,refundReason:reason,restoreStock:restore}).length)
+          setInfo('Sinyal hilang — perubahan disimpan di perangkat dan otomatis dikirim saat kembali online.')
+        }
       }
+      else applyLocalTransition(order,next,reason,restore)
     }catch(err:any){setError(err.message||'Update order gagal')}finally{setBusy(false);setPending(null)}
   }
+
+  const flushNow=async()=>{
+    if(!active?.cloud||!loadQueue().length)return
+    try{
+      const r=await flushWorkerQueue();setQueueLen(loadQueue().length)
+      if(r.dropped.length)setError(`${r.dropped.length} perubahan ditolak server (${r.dropped[0].reason}). Data disegarkan.`)
+      if(r.sent){setInfo(`${r.sent} perubahan tersinkron.`);await hydrateCloud()}
+    }catch{}
+  }
+
+  useEffect(()=>{
+    if(!active?.cloud)return
+    setQueueLen(loadQueue().length)
+    const onOnline=()=>void flushNow()
+    const onVisible=()=>{if(document.visibilityState==='visible')void flushNow()}
+    window.addEventListener('online',onOnline);document.addEventListener('visibilitychange',onVisible)
+    void flushNow()
+    return()=>{window.removeEventListener('online',onOnline);document.removeEventListener('visibilitychange',onVisible)}
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[active?.cloud,active?.id])
 
   const transition=(order:Order,next:OrderStatus)=>{
     if(!active)return
@@ -160,9 +195,10 @@ export default function WorkerPage(){
   if(!active)return <main className="min-h-screen bg-background text-foreground"><section className="mx-auto flex min-h-screen max-w-md items-center px-4"><form onSubmit={login} className="w-full space-y-5 rounded-2xl border bg-card p-6 shadow-sm"><div><p className="text-xs font-black uppercase tracking-[.18em] text-primary">Itemku Profit V6.4.2 · Worker</p><h1 className="mt-2 text-2xl font-black">Login Worker</h1><p className="mt-1 text-sm text-muted-foreground">{configured?'Masuk dengan akun Supabase. Permission dan game dikontrol Owner.':'Cloud belum dikonfigurasi; memakai akun Worker lokal sebagai fallback.'}</p></div><label className="grid gap-1.5 text-sm font-semibold">{configured?'Email Supabase':'Username'}<input autoComplete="username" value={email} onChange={e=>setEmail(e.target.value)} className="h-11 rounded-lg border bg-background px-3 font-normal"/></label><label className="grid gap-1.5 text-sm font-semibold">Sandi<input autoComplete="current-password" type="password" value={password} onChange={e=>setPassword(e.target.value)} className="h-11 rounded-lg border bg-background px-3 font-normal"/></label>{error&&<p className="rounded-lg bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950/30 dark:text-red-200">{error}</p>}<button disabled={busy} className="w-full rounded-lg bg-primary px-4 py-3 text-sm font-bold text-primary-foreground disabled:opacity-50">{busy?'Memproses...':'Masuk'}</button><a href="/" className="block text-center text-xs font-semibold text-muted-foreground">Kembali ke Owner</a></form></section></main>
 
   return <main className="min-h-screen bg-background pb-24 text-foreground md:pb-6">
-    <header className="sticky top-0 z-20 border-b bg-card/95 backdrop-blur"><div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-4"><div><p className="text-[10px] font-black uppercase tracking-[.18em] text-primary">Itemku Profit V6.4.2 · Worker</p><h1 className="text-xl font-black">{active.name}</h1><p className="text-xs text-muted-foreground">{active.cloud?`${active.role} · ${status}`:'Mode lokal'}</p></div><div className="flex items-center gap-2">{active.cloud&&<button onClick={()=>setNotifOpen(true)} aria-label="Notifikasi" className="relative rounded-lg border px-3 py-2 text-sm">🔔{unread>0&&<span className="absolute -right-1.5 -top-1.5 grid h-5 min-w-5 place-items-center rounded-full bg-red-600 px-1 text-[10px] font-black text-white">{unread>99?'99+':unread}</span>}</button>}<a href="/" className="rounded-lg border px-3 py-2 text-xs font-bold">Owner</a><button onClick={logout} className="rounded-lg border px-3 py-2 text-xs font-bold">Keluar</button></div></div></header>
+    <header className="sticky top-0 z-20 border-b bg-card/95 backdrop-blur"><div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-4"><div><p className="text-[10px] font-black uppercase tracking-[.18em] text-primary">Itemku Profit V6.4.2 · Worker</p><h1 className="text-xl font-black">{active.name}</h1><p className="text-xs text-muted-foreground">{active.cloud?`${active.role} · ${status}`:'Mode lokal'}</p></div><div className="flex items-center gap-2">{active.cloud&&queueLen>0&&<button onClick={()=>void flushNow()} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200">⏳ {queueLen} menunggu sinkron</button>}{active.cloud&&<button onClick={()=>setNotifOpen(true)} aria-label="Notifikasi" className="relative rounded-lg border px-3 py-2 text-sm">🔔{unread>0&&<span className="absolute -right-1.5 -top-1.5 grid h-5 min-w-5 place-items-center rounded-full bg-red-600 px-1 text-[10px] font-black text-white">{unread>99?'99+':unread}</span>}</button>}<a href="/" className="rounded-lg border px-3 py-2 text-xs font-bold">Owner</a><button onClick={logout} className="rounded-lg border px-3 py-2 text-xs font-bold">Keluar</button></div></div></header>
     <div className="mx-auto max-w-6xl space-y-4 p-4 sm:p-6">
       {error&&<div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-700 dark:bg-red-950/30 dark:text-red-200">{error}</div>}
+      {info&&<div className="rounded-xl border border-blue-200 bg-blue-50 p-3 text-sm font-semibold text-blue-800 dark:bg-blue-950/30 dark:text-blue-200">{info}</div>}
       <div className="flex flex-wrap gap-2">{(['orders','kinerja','payroll'] as const).map((s,i)=><button key={s} onClick={()=>setScreen(s)} className={`rounded-lg px-4 py-2 text-xs font-bold ${screen===s?'bg-primary text-primary-foreground':'border bg-card'}`}>{['Pesanan','Kinerja','Gaji Saya'][i]}</button>)}</div>
       {screen==='orders'?<>
         <section className="grid gap-3 sm:grid-cols-3"><Metric label="Order aktif" value={String(visibleOrders.filter(o=>o.status==='Baru'||o.status==='Diproses'||o.status==='Menunggu').length)}/><Metric label="Sedang saya proses" value={String(visibleOrders.filter(o=>o.status==='Diproses'&&isMine(o)).length)}/><Metric label="Game diizinkan" value={active.permissions.allowedGames.length?String(active.permissions.allowedGames.length):'Semua'}/></section>
