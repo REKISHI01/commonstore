@@ -17,6 +17,7 @@ export async function POST(req:Request){
       adjustStock:{fn:'adjust_stock_atomic',body:p=>({p_product_id:requiredText(p.productId,'Product ID',100),p_new_stock:nonNegative(p.newStock,'Stok',100000000),p_note:String(p.note||'').slice(0,1000)})},
       receivePurchaseOrder:{fn:'receive_purchase_order_atomic',body:p=>({p_po_id:requiredText(p.purchaseOrderId,'Purchase Order ID',100)})},
       assignOrder:{fn:'assign_order_atomic',body:p=>({p_order_id:requiredText(p.orderId,'Order ID',100),p_worker_id:p.workerId?requiredText(p.workerId,'Worker ID',100):null})},
+      markNotificationsRead:{fn:'worker_mark_notifications_read',body:p=>({p_ids:Array.isArray(p.ids)&&p.ids.length?p.ids.map((x:any)=>requiredText(x,'ID notifikasi',150)):null})},
     }
     const cfg=rpc[action]
     if(!cfg)return NextResponse.json({error:'Action tidak dikenal'},{status:400})

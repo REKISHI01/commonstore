@@ -1,6 +1,7 @@
 import type { AuditLog, BusinessTarget, CustomerNote, Expense, Opportunity, Order, PriceHistory, Product, Restock, WorkerPermissions } from './itemku'
 
 export type CloudUser = { id:string; email?:string; role?:'owner'|'worker'; name?:string; permissions?:WorkerPermissions; allowedGames?:string[] }
+export type WorkerNotification = { id:string; kind:string; level:'info'|'warn'|'danger'|'success'; title:string; detail:string; entityType?:string; entityId?:string; read:boolean; createdAt:string }
 export type CloudBundle = { products:Product[]; orders:Order[]; opportunities:Opportunity[]; audit:AuditLog[]; restocks:Restock[]; customerNotes:CustomerNote[]; expenses:Expense[]; targets:BusinessTarget[]; priceHistory:PriceHistory[]; profiles:any[]; v4?:any }
 
 async function api(path:string, init:RequestInit={}) {
@@ -24,6 +25,7 @@ export async function pushAll(data:CloudBundle){
   for(const [entity,rows] of entities) await syncEntity(entity,rows,true)
 }
 export async function cloudAction(action:string,payload:any={}) { return api('/action',{method:'POST',body:JSON.stringify({action,payload})}) }
+export async function markNotificationsRead(ids?:string[]) { return cloudAction('markNotificationsRead',{ids:ids&&ids.length?ids:undefined}) }
 export async function getRealtimeToken(){ return api('/realtime-token') as Promise<{url:string;anonKey:string;accessToken:string}> }
 
 export async function subscribeCloud(onChange:()=>void, onStatus?:(status:string)=>void) {
